@@ -1,0 +1,30 @@
+dataset:
+    path: "data/SQuAD-PL"
+    sample_size: 100000
+    dev_size: 0.1
+model:
+    path: "models/herbert-base-cased"
+    max_length: 384
+    stride: 128
+train:
+    seed: 42
+    epochs: 5
+    batch_size: 4
+    gradient_accumulation: 8
+    weight_decay: 1.0e-2
+    lr_initial: 1.0e-6
+    lr_peak: 1.0e-4
+    lr_final: 2.0e-5
+    t_warmup: 1000
+    t_decay: 10000
+    save_path: "experiments/1"
+    save_best: true
+    save_checkpoint: true
+    save_each_epoch: false
+augmentation:
+    p_drop_char: 0
+    p_drop_word: 0
+    p_drop_answer: 0
+    p_replace_synonym: 0
+    p_replace_noun: 0
+    p_back_translation: 0
