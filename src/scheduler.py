@@ -36,5 +36,8 @@ class LinearWarmupInverseSqrtDecayScheduler():
         for p in self.optimizer.param_groups:
             p["lr"] = self.lr
 
+    def get_t(self):
+        return self.t
+
     def get_lr(self):
         return self.lr
