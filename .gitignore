@@ -1,4 +1,6 @@
+configs/
 data/
+experiments/
 models/
 
 # Byte-compiled / optimized / DLL files

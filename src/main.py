@@ -17,7 +17,7 @@ from tqdm import tqdm
 from transformers import AdamW, AutoModelForQuestionAnswering, AutoTokenizer
 
 from .evaluation import *
-from .scheduler import LinearWarmupInverseSqrtDecayScheduler
+from .scheduler import *
 
 
 class Trainer:
@@ -104,7 +104,6 @@ class Trainer:
         spacy_nlp = spacy.load("pl_core_news_lg")
 
         df_back_translate = pd.DataFrame()
-
         for path in config["dataset"]["back_translate_paths"]:
             df_back_translate = pd.concat([df_back_translate, pd.read_csv(path).fillna("")])
 
@@ -124,13 +123,11 @@ class Trainer:
                     if len(temp) > 0:
                         temp = temp.sample(1).iloc[0]
 
-                        if np.random.rand() < 0.5:
-                            context = temp["context"]
-                            answer_text = temp["answer_text"]
-                            answer_start = temp["answer_start"]
+                        context = temp["context"]
+                        answer_text = temp["answer_text"]
+                        answer_start = temp["answer_start"]
 
-                        if np.random.rand() < 0.5:
-                            question = temp["question"]
+                        question = temp["question"]
 
             if config["augmentation"]["p_replace_question"] > 0:
                 if np.random.rand() < config["augmentation"]["p_replace_question"]:
@@ -223,7 +220,7 @@ class Trainer:
         return train_loader, dev_loader
 
     def run(self):
-        os.makedirs(self.config["train"]["save_path"], exist_ok=True)
+        os.makedirs(self.config["train"]["save_path"], exist_ok=False)
 
         self.seed_everything(self.config["train"]["seed"])
 
@@ -244,6 +241,28 @@ class Trainer:
         for epoch in pbar:
             train_loader, dev_loader = self.get_data_loaders(train_df.copy(), dev_df.copy())
 
+            def evaluate(model, dev_loader):
+                model = model.eval()
+
+                train_loss = 0
+                dev_loss = 0
+
+                with torch.no_grad():
+                    for x in tqdm(dev_loader, desc="eval dev", leave=False):
+                        dev_loss += model(
+                            input_ids=torch.stack(x["input_ids"], dim=1).to(device=device),
+                            attention_mask=torch.stack(x["attention_mask"], dim=1).to(device=device),
+                            start_positions=x["start_positions"].to(device=device),
+                            end_positions=x["end_positions"].to(device=device)
+                        ).loss.item() / len(dev_loader)
+
+                with open("{}/log.txt".format(self.config["train"]["save_path"]), "a") as f:
+                    f.write("{},{},{},{}\n".format(epoch, scheduler.get_t(), train_loss, dev_loss))
+
+                model = model.train()
+
+                return dev_loss
+
             model = model.train()
             batch_pbar = tqdm(train_loader, desc="train", leave=False)
 
@@ -263,33 +282,15 @@ class Trainer:
 
                     batch_pbar.set_description("train lr: {}".format(scheduler.get_lr()))
 
-            model = model.eval()
-            train_loss = 0
-            dev_loss = 0
+                    if (scheduler.get_t() + 1) % 10 == 0:
+                        dev_loss = evaluate(model, dev_loader)
 
-            with torch.no_grad():
-                for x in tqdm(train_loader, desc="eval train", leave=False):
-                    train_loss += model(
-                        input_ids=torch.stack(x["input_ids"], dim=1).to(device=device),
-                        attention_mask=torch.stack(x["attention_mask"], dim=1).to(device=device),
-                        start_positions=x["start_positions"].to(device=device),
-                        end_positions=x["end_positions"].to(device=device)
-                    ).loss.item() / len(train_loader)
+                        if dev_loss < best_loss:
+                            best_loss = dev_loss
 
-                for x in tqdm(dev_loader, desc="eval dev", leave=False):
-                    dev_loss += model(
-                        input_ids=torch.stack(x["input_ids"], dim=1).to(device=device),
-                        attention_mask=torch.stack(x["attention_mask"], dim=1).to(device=device),
-                        start_positions=x["start_positions"].to(device=device),
-                        end_positions=x["end_positions"].to(device=device)
-                    ).loss.item() / len(dev_loader)
-
-            if dev_loss < best_loss:
-                best_loss = dev_loss
-
-                if self.config["train"]["save_best"]:
-                    model.save_pretrained("{}/best".format(self.config["train"]["save_path"]))
-                    self.tokenizer.save_pretrained("{}/best".format(self.config["train"]["save_path"]))
+                            if self.config["train"]["save_best"]:
+                                model.save_pretrained("{}/best".format(self.config["train"]["save_path"]))
+                                self.tokenizer.save_pretrained("{}/best".format(self.config["train"]["save_path"]))
 
             if self.config["train"]["save_checkpoint"]:
                 model.save_pretrained("{}/checkpoint".format(self.config["train"]["save_path"]))
@@ -299,10 +300,7 @@ class Trainer:
                 model.save_pretrained("{}/epoch_{}".format(self.config["train"]["save_path"], epoch))
                 self.tokenizer.save_pretrained("{}/epoch_{}".format(self.config["train"]["save_path"], epoch))
 
-            with open("{}/log.txt".format(self.config["train"]["save_path"]), "a") as f:
-                f.write("{},{},{}\n".format(epoch, train_loss, dev_loss))
-
-            pbar.set_description("t: {} train: {:.4f} dev: {:.4f} best: {:.4f}".format(scheduler.get_t(), train_loss, dev_loss, best_loss))
+            #pbar.set_description("t: {} train: {:.4f} dev: {:.4f} best: {:.4f}".format(scheduler.get_t(), train_loss, dev_loss, best_loss))
 
         Evaluator(self.config).run()
 

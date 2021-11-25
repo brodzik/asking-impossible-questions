@@ -120,9 +120,7 @@ class Evaluator:
         eval_stats = {
             "N": len(df),
             "f1_mean": np.mean(f1),
-            "f1_std": np.std(f1),
             "em_mean": np.mean(em),
-            "em_std": np.std(em)
         }
 
         with open(self.config["train"]["save_path"] + "/eval_stats.json", "w") as f:
