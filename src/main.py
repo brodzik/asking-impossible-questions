@@ -6,6 +6,7 @@ import random
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import spacy
 import torch
 import yaml
 from datasets import Dataset
@@ -14,12 +15,12 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AdamW, AutoModelForQuestionAnswering, AutoTokenizer
-import spacy
 
+from .evaluation import *
 from .scheduler import LinearWarmupInverseSqrtDecayScheduler
 
 
-class Main():
+class Trainer:
     def __init__(self, config):
         self.config = config
         self.tokenizer = AutoTokenizer.from_pretrained(self.config["model"]["path"])
@@ -214,7 +215,6 @@ class Main():
         train_set = train_set.map(self.preprocess, batched=True, remove_columns=train_set.column_names)
         train_loader = DataLoader(train_set, batch_size=self.config["train"]["batch_size"], shuffle=True)
 
-        #dev_df = self.augment(dev_df)
         dev_df["answers"] = dev_df[["answer_start", "answer_text"]].apply(lambda x: {"answer_start": [x[0]], "answer_text": [x[1]]}, axis=1)
         dev_set = Dataset.from_pandas(dev_df)
         dev_set = dev_set.map(self.preprocess, batched=True, remove_columns=dev_set.column_names)
@@ -289,17 +289,22 @@ class Main():
 
                 if self.config["train"]["save_best"]:
                     model.save_pretrained("{}/best".format(self.config["train"]["save_path"]))
+                    self.tokenizer.save_pretrained("{}/best".format(self.config["train"]["save_path"]))
 
             if self.config["train"]["save_checkpoint"]:
                 model.save_pretrained("{}/checkpoint".format(self.config["train"]["save_path"]))
+                self.tokenizer.save_pretrained("{}/checkpoint".format(self.config["train"]["save_path"]))
 
             if self.config["train"]["save_each_epoch"]:
                 model.save_pretrained("{}/epoch_{}".format(self.config["train"]["save_path"], epoch))
+                self.tokenizer.save_pretrained("{}/epoch_{}".format(self.config["train"]["save_path"], epoch))
 
             with open("{}/log.txt".format(self.config["train"]["save_path"]), "a") as f:
                 f.write("{},{},{}\n".format(epoch, train_loss, dev_loss))
 
             pbar.set_description("t: {} train: {:.4f} dev: {:.4f} best: {:.4f}".format(scheduler.get_t(), train_loss, dev_loss, best_loss))
+
+        Evaluator(self.config).run()
 
 
 if __name__ == "__main__":
@@ -310,4 +315,4 @@ if __name__ == "__main__":
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
 
-    Main(config).run()
+    Trainer(config).run()
