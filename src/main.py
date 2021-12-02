@@ -113,31 +113,32 @@ class Trainer:
             answer_text = row["answer_text"].strip()
             answer_start = row["answer_start"]
 
-            context_l = context[:answer_start].strip()
-            context_r = context[answer_start + len(answer_text):].strip()
-
+            # Use back-translation for context, question, answer
             if config["augmentation"]["p_back_translate"] > 0:
                 if np.random.rand() < config["augmentation"]["p_back_translate"]:
-                    temp = df_back_translate[df_back_translate["qa_id"] == row["qa_id"]]
+                    relevant_rows = df_back_translate[df_back_translate["qa_id"] == row["qa_id"]]
 
-                    if len(temp) > 0:
-                        temp = temp.sample(1).iloc[0]
+                    if len(relevant_rows) > 0:
+                        sample_row = relevant_rows.sample(1).iloc[0]
+                        context = sample_row["context"]
+                        answer_text = sample_row["answer_text"]
+                        answer_start = sample_row["answer_start"]
 
-                        context = temp["context"]
-                        answer_text = temp["answer_text"]
-                        answer_start = temp["answer_start"]
+                        sample_row = relevant_rows.sample(1).iloc[0]
+                        question = sample_row["question"]
 
-                        question = temp["question"]
-
+            # Replace question with an irrelevant question with respect to the context
             if config["augmentation"]["p_replace_question"] > 0:
                 if np.random.rand() < config["augmentation"]["p_replace_question"]:
-                    temp = df_original[df_original["group_id"] != row["group_id"]]
+                    irrelevant_rows = df_original[df_original["group_id"] != row["group_id"]]
 
-                    if len(temp) > 0:
-                        question = temp.sample(1).iloc[0]["question"]
+                    if len(irrelevant_rows) > 0:
+                        question = irrelevant_rows.sample(1).iloc[0]["question"]
                         answer_text = ""
                         answer_start = 0
 
+            # TODO
+            """
             if config["augmentation"]["p_replace_question_entity"] > 0:
                 if np.random.rand() < config["augmentation"]["p_replace_question_entity"]:
                     temp = df_original[df_original["group_id"] != row["group_id"]]
@@ -155,22 +156,29 @@ class Trainer:
                         question = question.replace(e.text, random_context_entity)
                         answer_text = ""
                         answer_start = 0
+            """
 
             if config["augmentation"]["p_drop_answer"] > 0:
                 if np.random.rand() < config["augmentation"]["p_drop_answer"]:
                     answer_text = ""
                     answer_start = 0
 
+            context_l = context[:answer_start].strip()
+            context_r = context[answer_start + len(answer_text):].strip()
+
+            # Delete space-delimited tokens
             if config["augmentation"]["p_drop_token"] > 0:
                 context_l = " ".join([t for t in context_l.split() if np.random.rand() > config["augmentation"]["p_drop_token"]])
                 context_r = " ".join([t for t in context_r.split() if np.random.rand() > config["augmentation"]["p_drop_token"]])
                 answer_text = " ".join([t for t in answer_text.split() if np.random.rand() > config["augmentation"]["p_drop_token"]])
 
+            # Delete chars
             if config["augmentation"]["p_drop_char"] > 0:
                 context_l = "".join([c for c in context_l if np.random.rand() > config["augmentation"]["p_drop_char"]])
                 context_r = "".join([c for c in context_r if np.random.rand() > config["augmentation"]["p_drop_char"]])
                 answer_text = "".join([c for c in answer_text if np.random.rand() > config["augmentation"]["p_drop_char"]])
 
+            # Replace Polish chars
             if config["augmentation"]["p_replace_polish_char"] > 0:
                 polish_chars = {
                     "ą": "a",
@@ -282,7 +290,7 @@ class Trainer:
 
                     batch_pbar.set_description("train lr: {}".format(scheduler.get_lr()))
 
-                    if (scheduler.get_t() + 1) % 10 == 0:
+                    if (scheduler.get_t() + 1) % self.config["train"]["eval_freq"] == 0:
                         dev_loss = evaluate(model, dev_loader)
 
                         if dev_loss < best_loss:
