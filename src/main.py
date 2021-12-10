@@ -2,8 +2,10 @@ import argparse
 import math
 import os
 import random
+import sys
 
 import matplotlib.pyplot as plt
+import morfeusz2
 import numpy as np
 import pandas as pd
 import spacy
@@ -14,10 +16,12 @@ from sklearn.model_selection import train_test_split
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AdamW, AutoModelForQuestionAnswering, AutoTokenizer
+from transformers import (AdamW, AutoModelForQuestionAnswering, AutoTokenizer,
+                          pipeline)
 
 from .evaluation import *
-from .scheduler import *
+
+mf = morfeusz2.Morfeusz()
 
 
 class Trainer:
@@ -97,39 +101,83 @@ class Trainer:
         return tokenized_examples
 
     def augment(self, df_original):
+        # Check if augmentations are enabled, if not skip this function
         if not self.config["augmentation"]["enabled"]:
             return df_original
 
+        # Create a copy of the original dataframe that will be modified;
+        # the original is used in some augmentations
         df = df_original.copy()
-        spacy_nlp = spacy.load("pl_core_news_lg")
 
-        df_back_translate = pd.DataFrame()
-        for path in config["dataset"]["back_translate_paths"]:
-            df_back_translate = pd.concat([df_back_translate, pd.read_csv(path).fillna("")])
+        # Load spaCy Polish language pipeline for text analysis;
+        # source: https://spacy.io/models/pl
+        if config["augmentation"]["p_replace_question_entity"] > 0:
+            spacy_nlp = spacy.load("pl_core_news_lg")
 
+        # Load Masked Language Model (MLM) for Polish language
+        if config["augmentation"]["p_replace_question_entity"] > 0:
+            herbert_mlm = pipeline("fill-mask", model="allegro/herbert-base-cased")
+
+        # Load supplementary back-translated dataframes related to the original dataframe
+        if config["augmentation"]["p_back_translate"] > 0:
+            df_back_translate = pd.DataFrame()
+            for path in config["dataset"]["back_translate_paths"]:
+                df_back_translate = pd.concat([df_back_translate, pd.read_csv(path).fillna("")])
+
+        # Augment each record individually
         for i, row in tqdm(df.iterrows(), total=len(df), desc="augment"):
             context = row["context"]
             question = row["question"]
             answer_text = row["answer_text"].strip()
             answer_start = row["answer_start"]
 
+            print("ORIGINAL:")
+            print(context)
+            print(question)
+            print(answer_text)
+            print("=" * 100)
+
             # Use back-translation for context, question, answer
             if config["augmentation"]["p_back_translate"] > 0:
                 if np.random.rand() < config["augmentation"]["p_back_translate"]:
+                    # Fetch contextually identical records
                     relevant_rows = df_back_translate[df_back_translate["qa_id"] == row["qa_id"]]
 
                     if len(relevant_rows) > 0:
+                        # Choose random translation
                         sample_row = relevant_rows.sample(1).iloc[0]
                         context = sample_row["context"]
                         answer_text = sample_row["answer_text"]
                         answer_start = sample_row["answer_start"]
 
+                        # Question can be randomized independently
                         sample_row = relevant_rows.sample(1).iloc[0]
                         question = sample_row["question"]
+
+            # Add random context before original context
+            if config["augmentation"]["p_prepend_context"] > 0:
+                if np.random.rand() < config["augmentation"]["p_prepend_context"]:
+                    # Fetch contextually different records
+                    irrelevant_rows = df_original[df_original["group_id"] != row["group_id"]]
+
+                    if len(irrelevant_rows) > 0:
+                        temp = irrelevant_rows.sample(1).iloc[0]["context"]
+                        context = temp + " " + context
+                        answer_start += len(temp) + 1
+
+            # Add random context after original context
+            if config["augmentation"]["p_append_context"] > 0:
+                if np.random.rand() < config["augmentation"]["p_append_context"]:
+                    # Fetch contextually different records
+                    irrelevant_rows = df_original[df_original["group_id"] != row["group_id"]]
+
+                    if len(irrelevant_rows) > 0:
+                        context = context + " " + irrelevant_rows.sample(1).iloc[0]["context"]
 
             # Replace question with an irrelevant question with respect to the context
             if config["augmentation"]["p_replace_question"] > 0:
                 if np.random.rand() < config["augmentation"]["p_replace_question"]:
+                    # Fetch contextually different records
                     irrelevant_rows = df_original[df_original["group_id"] != row["group_id"]]
 
                     if len(irrelevant_rows) > 0:
@@ -137,69 +185,125 @@ class Trainer:
                         answer_text = ""
                         answer_start = 0
 
-            # TODO
-            """
+            # Find and replace noun entities in question using MLM
             if config["augmentation"]["p_replace_question_entity"] > 0:
-                if np.random.rand() < config["augmentation"]["p_replace_question_entity"]:
-                    temp = df_original[df_original["group_id"] != row["group_id"]]
+                # Copy original question to working variable
+                new_question = question
 
-                    for e in spacy_nlp(question).ents:
-                        while True:
-                            random_context = temp.sample(1).iloc[0]["context"]
-                            random_context_entities = list(set(e.text for e in spacy_nlp(random_context).ents))
+                # For each noun entity
+                for e in spacy_nlp(question).ents:
+                    # Randomly replace it with suitable word/phrase
+                    if np.random.rand() < config["augmentation"]["p_replace_question_entity"]:
+                        # Mask original entity text
+                        masked_question = new_question.replace(e.text, self.tokenizer.mask_token)
 
-                            if len(random_context_entities) > 0:
-                                break
+                        # Generate new text
+                        candidate_questions = herbert_mlm(masked_question)
 
-                        random_context_entity = np.random.choice(random_context_entities)
+                        # Replace entity text
+                        new_question = np.random.choice(candidate_questions)["sequence"]
 
-                        question = question.replace(e.text, random_context_entity)
-                        answer_text = ""
-                        answer_start = 0
-            """
-
-            if config["augmentation"]["p_drop_answer"] > 0:
-                if np.random.rand() < config["augmentation"]["p_drop_answer"]:
+                # Check if any noun entities were actually changed
+                if question != new_question:
+                    question = new_question
                     answer_text = ""
                     answer_start = 0
 
+            if config["augmentation"]["p_change_question_type"] > 0:
+                # TODO
+                pass
+
+            # Completely delete answer
+            if config["augmentation"]["p_drop_answer"] > 0:
+                if np.random.rand() < config["augmentation"]["p_drop_answer"]:
+                    if config["augmentation"]["replace_dropped_answer_with_mask"]:
+                        context = context.replace(answer_text, self.tokenizer.mask_token)
+                    else:
+                        context = context.replace(answer_text, "")
+
+                    answer_text = ""
+                    answer_start = 0
+
+            # Split contexts to track answer changes independently
             context_l = context[:answer_start].strip()
             context_r = context[answer_start + len(answer_text):].strip()
 
             # Delete space-delimited tokens
             if config["augmentation"]["p_drop_token"] > 0:
-                context_l = " ".join([t for t in context_l.split() if np.random.rand() > config["augmentation"]["p_drop_token"]])
-                context_r = " ".join([t for t in context_r.split() if np.random.rand() > config["augmentation"]["p_drop_token"]])
-                answer_text = " ".join([t for t in answer_text.split() if np.random.rand() > config["augmentation"]["p_drop_token"]])
+                def drop_token(text):
+                    if config["augmentation"]["replace_dropped_token_with_mask"]:
+                        return " ".join([(t if np.random.rand() > config["augmentation"]["p_drop_token"] else self.tokenizer.mask_token) for t in text.split()])
+                    else:
+                        return " ".join([t for t in text.split() if np.random.rand() > config["augmentation"]["p_drop_token"]])
+
+                context_l = drop_token(context_l)
+                context_r = drop_token(context_r)
+                answer_text = drop_token(answer_text)
+
+            # Replace word with its lemma
+            if config["augmentation"]["p_replace_token_with_lemma"] > 0:
+                def replace_token_with_lemma(text):
+                    lemmas = {}
+
+                    for _, _, interp in mf.analyse(text):
+                        if interp[0] not in lemmas:
+                            lemmas[interp[0]] = interp[1].split(":")[0]
+
+                    text = " ".join([(lemmas[t] if np.random.rand() < config["augmentation"]["p_replace_token_with_lemma"] and t in lemmas else t) for t in text.split()])
+
+                    return text
+
+                context_l = replace_token_with_lemma(context_l)
+                context_r = replace_token_with_lemma(context_r)
+                answer_text = replace_token_with_lemma(answer_text)
 
             # Delete chars
             if config["augmentation"]["p_drop_char"] > 0:
-                context_l = "".join([c for c in context_l if np.random.rand() > config["augmentation"]["p_drop_char"]])
-                context_r = "".join([c for c in context_r if np.random.rand() > config["augmentation"]["p_drop_char"]])
-                answer_text = "".join([c for c in answer_text if np.random.rand() > config["augmentation"]["p_drop_char"]])
+                def drop_char(text):
+                    return "".join([c for c in text if np.random.rand() > config["augmentation"]["p_drop_char"]])
+
+                context_l = drop_char(context_l)
+                context_r = drop_char(context_r)
+                answer_text = drop_char(answer_text)
 
             # Replace Polish chars
             if config["augmentation"]["p_replace_polish_char"] > 0:
-                polish_chars = {
-                    "ą": "a",
-                    "ć": "c",
-                    "ę": "e",
-                    "ł": "l",
-                    "ń": "n",
-                    "ó": "o",
-                    "ś": "s",
-                    "ź": "z",
-                    "ż": "z"
-                }
+                def replace_polish_char(text):
+                    polish_chars = {
+                        "ą": "a",
+                        "ć": "c",
+                        "ę": "e",
+                        "ł": "l",
+                        "ń": "n",
+                        "ó": "o",
+                        "ś": "s",
+                        "ź": "z",
+                        "ż": "z"
+                    }
 
-                context_l = "".join([(polish_chars[c] if c in polish_chars and np.random.rand() < config["augmentation"]["p_replace_polish_char"] else c) for c in context_l])
-                context_r = "".join([(polish_chars[c] if c in polish_chars and np.random.rand() < config["augmentation"]["p_replace_polish_char"] else c) for c in context_r])
-                answer_text = "".join([(polish_chars[c] if c in polish_chars and np.random.rand() < config["augmentation"]["p_replace_polish_char"] else c) for c in answer_text])
+                    return "".join([(polish_chars[c] if c in polish_chars and np.random.rand() < config["augmentation"]["p_replace_polish_char"] else c) for c in text])
+
+                context_l = replace_polish_char(context_l)
+                context_r = replace_polish_char(context_r)
+                answer_text = replace_polish_char(answer_text)
+
+            # Convert uppercase to lowercase
+            if config["augmentation"]["p_lowercase_char"] > 0:
+                def p_lowercase_char(text):
+                    return "".join([(c.lower() if np.random.rand() < config["augmentation"]["p_lowercase_char"] else c) for c in text])
+
+                context_l = p_lowercase_char(context_l)
+                context_r = p_lowercase_char(context_r)
+                answer_text = p_lowercase_char(answer_text)
 
             answer_text = answer_text.strip()
-            context_l = context_l.strip() + " "
-            context_r = " " + context_r.strip()
-            context = context_l + answer_text + context_r
+
+            if len(answer_text) > 0:
+                context_l = context_l.strip() + " "
+                context_r = " " + context_r.strip()
+                context = context_l + answer_text + context_r
+            else:
+                context = context_l + context_r
 
             df.loc[i, "context"] = context
             df.loc[i, "question"] = question
@@ -208,6 +312,12 @@ class Trainer:
             df.loc[i, "has_answer"] = int(len(answer_text) > 0)
 
             assert answer_text == df.loc[i, "context"][df.loc[i, "answer_start"]:df.loc[i, "answer_start"] + len(df.loc[i, "answer_text"])]
+
+            print("AUGMENTED:")
+            print(context)
+            print(question)
+            print(answer_text)
+            nam
 
         print("has_answer", df["has_answer"].sum() / len(df))
 
@@ -228,7 +338,8 @@ class Trainer:
         return train_loader, dev_loader
 
     def run(self):
-        os.makedirs(self.config["train"]["save_path"], exist_ok=False)
+        #os.makedirs(self.config["train"]["save_path"], exist_ok=False)
+        os.makedirs(self.config["train"]["save_path"], exist_ok=True)
 
         self.seed_everything(self.config["train"]["seed"])
 
@@ -240,19 +351,17 @@ class Trainer:
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = AutoModelForQuestionAnswering.from_pretrained(self.config["model"]["path"]).to(device=device)
-        optimizer = AdamW(model.parameters(), lr=self.config["train"]["lr_initial"], weight_decay=self.config["train"]["weight_decay"])
-        scheduler = LinearWarmupInverseSqrtDecayScheduler(optimizer, lr_initial=self.config["train"]["lr_initial"], lr_peak=self.config["train"]["lr_peak"], lr_final=self.config["train"]["lr_final"], t_warmup=self.config["train"]["t_warmup"], t_decay=self.config["train"]["t_decay"])
+        optimizer = AdamW(model.parameters(), lr=self.config["train"]["lr"], weight_decay=self.config["train"]["weight_decay"])
 
         pbar = tqdm(range(self.config["train"]["epochs"]))
         best_loss = np.inf
+        t = 0
 
         for epoch in pbar:
             train_loader, dev_loader = self.get_data_loaders(train_df.copy(), dev_df.copy())
 
             def evaluate(model, dev_loader):
                 model = model.eval()
-
-                train_loss = 0
                 dev_loss = 0
 
                 with torch.no_grad():
@@ -286,11 +395,11 @@ class Trainer:
                     clip_grad_norm_(model.parameters(), 1.0)
                     optimizer.step()
                     optimizer.zero_grad()
-                    scheduler.step()
+                    t += 1
 
                     batch_pbar.set_description("train lr: {}".format(scheduler.get_lr()))
 
-                    if (scheduler.get_t() + 1) % self.config["train"]["eval_freq"] == 0:
+                    if (t + 1) % self.config["train"]["eval_freq"] == 0:
                         dev_loss = evaluate(model, dev_loader)
 
                         if dev_loss < best_loss:
@@ -314,6 +423,8 @@ class Trainer:
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")
+
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
     args = parser.parse_args()
