@@ -105,8 +105,14 @@ class Evaluator:
                             "text": context[start_char:end_char]
                         })
 
-        f1 = []
-        em = []
+        f1_all = []
+        em_all = []
+
+        f1_answer = []
+        em_answer = []
+
+        f1_no_answer = []
+        em_no_answer = []
 
         for k, v in preds.items():
             v.sort(reverse=True, key=lambda x: x["score"])
@@ -114,13 +120,29 @@ class Evaluator:
             gold_text = df.loc[df["qa_id"] == k, "answer_text"].iloc[0]
             pred_text = v[0]["text"] if v[0]["score"] > best_null_score[qa_id] else ""
 
-            f1.append(compute_f1(gold_text, pred_text))
-            em.append(compute_em(gold_text, pred_text))
+            f1 = compute_f1(gold_text, pred_text)
+            em = compute_em(gold_text, pred_text)
+
+            f1_all.append(f1)
+            em_all.append(em)
+
+            if gold_text:
+                f1_answer.append(f1)
+                em_answer.append(em)
+            else:
+                f1_no_answer.append(f1)
+                em_no_answer.append(em)
 
         eval_stats = {
-            "N": len(df),
-            "f1_mean": np.mean(f1),
-            "em_mean": np.mean(em),
+            "N": len(f1_all),
+            "f1": np.mean(f1_all),
+            "em": np.mean(em_all),
+            "N_answer": len(f1_answer),
+            "f1_answer": np.mean(f1_answer),
+            "em_answer": np.mean(em_answer),
+            "N_no_answer": len(f1_no_answer),
+            "f1_no_answer": np.mean(f1_no_answer),
+            "em_no_answer": np.mean(em_no_answer)
         }
 
         with open(self.config["train"]["save_path"] + "/eval_stats.json", "w") as f:

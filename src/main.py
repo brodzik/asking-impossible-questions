@@ -111,21 +111,21 @@ class Trainer:
 
         # Load spaCy Polish language pipeline for text analysis;
         # source: https://spacy.io/models/pl
-        if config["augmentation"]["p_replace_question_entity"] > 0:
+        if self.config["augmentation"]["p_replace_question_entity"] > 0:
             spacy_nlp = spacy.load("pl_core_news_lg")
 
         # Load Masked Language Model (MLM) for Polish language
-        if config["augmentation"]["p_replace_question_entity"] > 0 or config["augmentation"]["n_insert_token"] > 0:
+        if self.config["augmentation"]["p_replace_question_entity"] > 0 or self.config["augmentation"]["n_insert_context_token"] > 0:
             herbert_mlm = pipeline("fill-mask", model="allegro/herbert-base-cased")
 
         # Load supplementary back-translated dataframes related to the original dataframe
-        if config["augmentation"]["p_back_translate"] > 0:
+        if self.config["augmentation"]["p_back_translate"] > 0:
             df_back_translate = pd.DataFrame()
             for path in config["dataset"]["back_translate_paths"]:
                 df_back_translate = pd.concat([df_back_translate, pd.read_csv(path).fillna("")])
 
         # Load common question words to replace
-        if config["augmentation"]["p_change_question_type"] > 0:
+        if self.config["augmentation"]["p_change_question_type"] > 0:
             question_first_word = pd.read_csv("data/question_first_word.csv")
             question_first_two_words = pd.read_csv("data/question_first_two_words.csv")
 
@@ -136,15 +136,9 @@ class Trainer:
             answer_text = row["answer_text"].strip()
             answer_start = row["answer_start"]
 
-            print("ORIGINAL:")
-            print(context)
-            print(question)
-            print(answer_text)
-            print("=" * 100)
-
             # Use back-translation for context, question, answer
-            if config["augmentation"]["p_back_translate"] > 0:
-                if np.random.rand() < config["augmentation"]["p_back_translate"]:
+            if self.config["augmentation"]["p_back_translate"] > 0:
+                if np.random.rand() < self.config["augmentation"]["p_back_translate"]:
                     # Fetch contextually identical records
                     relevant_rows = df_back_translate[df_back_translate["qa_id"] == row["qa_id"]]
 
@@ -160,8 +154,8 @@ class Trainer:
                         question = sample_row["question"]
 
             # Add random context before original context
-            if config["augmentation"]["p_prepend_context"] > 0:
-                if np.random.rand() < config["augmentation"]["p_prepend_context"]:
+            if self.config["augmentation"]["p_prepend_context"] > 0:
+                if np.random.rand() < self.config["augmentation"]["p_prepend_context"]:
                     # Fetch contextually different records
                     irrelevant_rows = df_original[df_original["group_id"] != row["group_id"]]
 
@@ -171,8 +165,8 @@ class Trainer:
                         answer_start += len(temp) + 1
 
             # Add random context after original context
-            if config["augmentation"]["p_append_context"] > 0:
-                if np.random.rand() < config["augmentation"]["p_append_context"]:
+            if self.config["augmentation"]["p_append_context"] > 0:
+                if np.random.rand() < self.config["augmentation"]["p_append_context"]:
                     # Fetch contextually different records
                     irrelevant_rows = df_original[df_original["group_id"] != row["group_id"]]
 
@@ -180,8 +174,8 @@ class Trainer:
                         context = context + " " + irrelevant_rows.sample(1).iloc[0]["context"]
 
             # Replace question with an irrelevant question with respect to the context
-            if config["augmentation"]["p_replace_question"] > 0:
-                if np.random.rand() < config["augmentation"]["p_replace_question"]:
+            if self.config["augmentation"]["p_replace_question"] > 0:
+                if np.random.rand() < self.config["augmentation"]["p_replace_question"]:
                     # Fetch contextually different records
                     irrelevant_rows = df_original[df_original["group_id"] != row["group_id"]]
 
@@ -191,22 +185,23 @@ class Trainer:
                         answer_start = 0
 
             # Find and replace noun entities in question using MLM
-            if config["augmentation"]["p_replace_question_entity"] > 0:
+            if self.config["augmentation"]["p_replace_question_entity"] > 0:
                 # Copy original question to working variable
                 new_question = question
 
                 # For each noun entity
                 for e in spacy_nlp(question).ents:
                     # Randomly replace it with suitable word/phrase
-                    if np.random.rand() < config["augmentation"]["p_replace_question_entity"]:
+                    if np.random.rand() < self.config["augmentation"]["p_replace_question_entity"]:
                         # Mask original entity text
-                        masked_question = new_question.replace(e.text, herbert_mlm.tokenizer.mask_token)
+                        masked_question = new_question.replace(e.text, herbert_mlm.tokenizer.mask_token, 1)
 
-                        # Generate new text
-                        candidate_questions = herbert_mlm(masked_question)
+                        if herbert_mlm.tokenizer.mask_token in masked_question:
+                            # Generate new text
+                            candidate_questions = herbert_mlm(masked_question)
 
-                        # Replace entity text
-                        new_question = np.random.choice(candidate_questions)["sequence"]
+                            # Replace entity text
+                            new_question = np.random.choice(candidate_questions)["sequence"]
 
                 # Check if any noun entities were actually changed
                 if question != new_question:
@@ -214,8 +209,8 @@ class Trainer:
                     answer_text = ""
                     answer_start = 0
 
-            if config["augmentation"]["p_change_question_type"] > 0:
-                if np.random.rand() < config["augmentation"]["p_change_question_type"]:
+            if self.config["augmentation"]["p_change_question_type"] > 0:
+                if np.random.rand() < self.config["augmentation"]["p_change_question_type"]:
                     tokens = question.split()
 
                     if np.random.rand() < 0.5:
@@ -233,9 +228,9 @@ class Trainer:
                         answer_start = 0
 
             # Completely delete answer
-            if config["augmentation"]["p_drop_answer"] > 0:
-                if np.random.rand() < config["augmentation"]["p_drop_answer"]:
-                    if config["augmentation"]["replace_dropped_answer_with_mask"]:
+            if self.config["augmentation"]["p_drop_answer"] > 0:
+                if np.random.rand() < self.config["augmentation"]["p_drop_answer"]:
+                    if self.config["augmentation"]["replace_dropped_answer_with_mask"]:
                         context = context.replace(answer_text, self.tokenizer.mask_token)
                     else:
                         context = context.replace(answer_text, "")
@@ -248,24 +243,24 @@ class Trainer:
             context_r = context[answer_start + len(answer_text):].strip()
 
             # Delete space-delimited tokens
-            if config["augmentation"]["p_drop_token"] > 0:
+            if self.config["augmentation"]["p_drop_token"] > 0:
                 def drop_token(text):
-                    if config["augmentation"]["replace_dropped_token_with_mask"]:
-                        return " ".join([(t if np.random.rand() > config["augmentation"]["p_drop_token"] else self.tokenizer.mask_token) for t in text.split()])
+                    if self.config["augmentation"]["replace_dropped_token_with_mask"]:
+                        return " ".join([(t if np.random.rand() > self.config["augmentation"]["p_drop_token"] else self.tokenizer.mask_token) for t in text.split()])
                     else:
-                        return " ".join([t for t in text.split() if np.random.rand() > config["augmentation"]["p_drop_token"]])
+                        return " ".join([t for t in text.split() if np.random.rand() > self.config["augmentation"]["p_drop_token"]])
 
                 context_l = drop_token(context_l)
                 context_r = drop_token(context_r)
                 answer_text = drop_token(answer_text)
 
             # Insert tokens generated by MLM
-            if config["augmentation"]["n_insert_token"] > 0:
+            if self.config["augmentation"]["n_insert_context_token"] > 0:
                 def insert_token(text):
                     if len(text) <= 0:
                         return text
 
-                    for _ in range(config["augmentation"]["n_insert_token"]):
+                    for _ in range(self.config["augmentation"]["n_insert_context_token"]):
                         tokens = text.split()
                         i = np.random.randint(len(tokens))
                         tokens = tokens[:i] + [herbert_mlm.tokenizer.mask_token] + tokens[i:]
@@ -279,7 +274,7 @@ class Trainer:
                 context_r = insert_token(context_r)
 
             # Replace word with its lemma
-            if config["augmentation"]["p_replace_token_with_lemma"] > 0:
+            if self.config["augmentation"]["p_replace_token_with_lemma"] > 0:
                 def replace_token_with_lemma(text):
                     lemmas = {}
 
@@ -287,7 +282,7 @@ class Trainer:
                         if interp[0] not in lemmas:
                             lemmas[interp[0]] = interp[1].split(":")[0]
 
-                    text = " ".join([(lemmas[t] if np.random.rand() < config["augmentation"]["p_replace_token_with_lemma"] and t in lemmas else t) for t in text.split()])
+                    text = " ".join([(lemmas[t] if np.random.rand() < self.config["augmentation"]["p_replace_token_with_lemma"] and t in lemmas else t) for t in text.split()])
 
                     return text
 
@@ -296,12 +291,12 @@ class Trainer:
                 answer_text = replace_token_with_lemma(answer_text)
 
             # Swap two neighbouring tokens
-            if config["augmentation"]["p_swap_token"] > 0:
+            if self.config["augmentation"]["p_swap_token"] > 0:
                 def swap_token(text):
                     tokens = text.split()
 
                     for i in range(len(tokens) - 1):
-                        if np.random.rand() < config["augmentation"]["p_swap_token"]:
+                        if np.random.rand() < self.config["augmentation"]["p_swap_token"]:
                             temp = tokens[i]
                             tokens[i] = tokens[i + 1]
                             tokens[i + 1] = temp
@@ -313,16 +308,16 @@ class Trainer:
                 answer_text = swap_token(answer_text)
 
             # Delete chars
-            if config["augmentation"]["p_drop_char"] > 0:
+            if self.config["augmentation"]["p_drop_char"] > 0:
                 def drop_char(text):
-                    return "".join([c for c in text if np.random.rand() > config["augmentation"]["p_drop_char"]])
+                    return "".join([c for c in text if np.random.rand() > self.config["augmentation"]["p_drop_char"]])
 
                 context_l = drop_char(context_l)
                 context_r = drop_char(context_r)
                 answer_text = drop_char(answer_text)
 
             # Replace Polish chars
-            if config["augmentation"]["p_replace_polish_char"] > 0:
+            if self.config["augmentation"]["p_replace_polish_char"] > 0:
                 def replace_polish_char(text):
                     polish_chars = {
                         "ą": "a",
@@ -336,16 +331,16 @@ class Trainer:
                         "ż": "z"
                     }
 
-                    return "".join([(polish_chars[c] if c in polish_chars and np.random.rand() < config["augmentation"]["p_replace_polish_char"] else c) for c in text])
+                    return "".join([(polish_chars[c] if c in polish_chars and np.random.rand() < self.config["augmentation"]["p_replace_polish_char"] else c) for c in text])
 
                 context_l = replace_polish_char(context_l)
                 context_r = replace_polish_char(context_r)
                 answer_text = replace_polish_char(answer_text)
 
             # Convert uppercase to lowercase
-            if config["augmentation"]["p_lowercase_char"] > 0:
+            if self.config["augmentation"]["p_lowercase_char"] > 0:
                 def p_lowercase_char(text):
-                    return "".join([(c.lower() if np.random.rand() < config["augmentation"]["p_lowercase_char"] else c) for c in text])
+                    return "".join([(c.lower() if np.random.rand() < self.config["augmentation"]["p_lowercase_char"] else c) for c in text])
 
                 context_l = p_lowercase_char(context_l)
                 context_r = p_lowercase_char(context_r)
@@ -368,14 +363,7 @@ class Trainer:
 
             assert answer_text == df.loc[i, "context"][df.loc[i, "answer_start"]:df.loc[i, "answer_start"] + len(df.loc[i, "answer_text"])]
 
-            print("AUGMENTED:")
-            print(context)
-            print(question)
-            print(answer_text)
-            # nam
-
         print("has_answer", df["has_answer"].sum() / len(df))
-        nam
 
         return df
 
@@ -394,8 +382,15 @@ class Trainer:
         return train_loader, dev_loader
 
     def run(self):
-        #os.makedirs(self.config["train"]["save_path"], exist_ok=False)
-        os.makedirs(self.config["train"]["save_path"], exist_ok=True)
+        print("="*100)
+        print("="*100)
+        print("="*100)
+        print("Running experiment:", config["train"]["save_path"])
+        print("="*100)
+        print("="*100)
+        print("="*100)
+
+        os.makedirs(self.config["train"]["save_path"], exist_ok=False)
 
         self.seed_everything(self.config["train"]["seed"])
 
@@ -430,16 +425,15 @@ class Trainer:
                         ).loss.item() / len(dev_loader)
 
                 with open("{}/log.txt".format(self.config["train"]["save_path"]), "a") as f:
-                    f.write("{},{},{},{}\n".format(epoch, scheduler.get_t(), train_loss, dev_loss))
+                    f.write("{},{},{}\n".format(epoch, t, dev_loss))
 
                 model = model.train()
 
                 return dev_loss
 
             model = model.train()
-            batch_pbar = tqdm(train_loader, desc="train", leave=False)
 
-            for i, x in enumerate(batch_pbar):
+            for i, x in enumerate(tqdm(train_loader, desc="train", leave=False)):
                 model(
                     input_ids=torch.stack(x["input_ids"], dim=1).to(device=device),
                     attention_mask=torch.stack(x["attention_mask"], dim=1).to(device=device),
@@ -452,8 +446,6 @@ class Trainer:
                     optimizer.step()
                     optimizer.zero_grad()
                     t += 1
-
-                    batch_pbar.set_description("train lr: {}".format(scheduler.get_lr()))
 
                     if (t + 1) % self.config["train"]["eval_freq"] == 0:
                         dev_loss = evaluate(model, dev_loader)
