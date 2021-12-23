@@ -243,13 +243,14 @@ class Trainer:
 
                 n = np.random.randint(self.config["augmentation"]["n_insert_context_token"] + 1)
 
-                if answer_text:
-                    context = context[:answer_start].strip() + " [ANSWER] " + context[answer_start + len(answer_text):].strip()
-                    context = insert_token(context, n)
-                    answer_start = context.find("[ANSWER]")
-                    context = context.replace("[ANSWER]", answer_text)
-                else:
-                    context = insert_token(context, n)
+                if n > 0:
+                    if answer_text:
+                        context = context[:answer_start].strip() + " [ANSWER] " + context[answer_start + len(answer_text):].strip()
+                        context = insert_token(context, n)
+                        answer_start = context.find("[ANSWER]")
+                        context = context.replace("[ANSWER]", answer_text)
+                    else:
+                        context = insert_token(context, n)
 
             # Split contexts to track answer changes independently
             context_l = context[:answer_start].strip()
@@ -381,6 +382,7 @@ class Trainer:
         train_set = train_set.map(self.preprocess, batched=True, remove_columns=train_set.column_names)
         train_loader = DataLoader(train_set, batch_size=self.config["train"]["batch_size"], shuffle=True)
 
+        dev_df = self.augment(dev_df)
         dev_df["answers"] = dev_df[["answer_start", "answer_text"]].apply(lambda x: {"answer_start": [x[0]], "answer_text": [x[1]]}, axis=1)
         dev_set = Dataset.from_pandas(dev_df)
         dev_set = dev_set.map(self.preprocess, batched=True, remove_columns=dev_set.column_names)
