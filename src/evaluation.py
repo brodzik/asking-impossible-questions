@@ -118,7 +118,10 @@ class Evaluator:
             v.sort(reverse=True, key=lambda x: x["score"])
 
             gold_text = df.loc[df["qa_id"] == k, "answer_text"].iloc[0]
-            pred_text = v[0]["text"] if v[0]["score"] > best_null_score[qa_id] else ""
+            if len(v) > 0:
+                pred_text = v[0]["text"] if v[0]["score"] > best_null_score[k] else ""
+            else:
+                pred_text = ""
 
             f1 = compute_f1(gold_text, pred_text)
             em = compute_em(gold_text, pred_text)
