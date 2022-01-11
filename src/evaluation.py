@@ -22,6 +22,11 @@ class Evaluator:
         self.pad_on_right = self.tokenizer.padding_side == "right"
 
     def preprocess(self, examples):
+        """
+        Tokenize contexts and questions.
+        Source: https://github.com/huggingface/notebooks/blob/master/examples/question_answering.ipynb
+        """
+
         tokenized_examples = self.tokenizer(
             examples["question" if self.pad_on_right else "context"],
             examples["context" if self.pad_on_right else "question"],
@@ -46,8 +51,12 @@ class Evaluator:
         return tokenized_examples
 
     def run(self):
+        """
+        Evaluate model using test set.
+        Source: https://github.com/huggingface/notebooks/blob/master/examples/question_answering.ipynb
+        """
+
         df = pd.read_csv(self.config["dataset"]["test_path"]).fillna("").reset_index(drop=True)
-        df["answers"] = df[["answer_start", "answer_text"]].apply(lambda x: {"answer_start": [x[0]], "answer_text": [x[1]]}, axis=1)
         test_set = Dataset.from_pandas(df)
         test_set = test_set.map(self.preprocess, batched=True, remove_columns=test_set.column_names)
 

@@ -15,10 +15,20 @@ def get_tokens(text):
 
 
 def compute_em(gold_text, pred_text):
+    """
+    Compute exact match metric.
+    Source: https://rajpurkar.github.io/SQuAD-explorer/
+    """
+
     return int(normalize_text(gold_text) == normalize_text(pred_text))
 
 
 def compute_f1(gold_text, pred_text):
+    """
+    Compute F1 score.
+    Source: https://rajpurkar.github.io/SQuAD-explorer/
+    """
+
     gold_tokens = get_tokens(gold_text)
     pred_tokens = get_tokens(pred_text)
 

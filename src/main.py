@@ -100,29 +100,28 @@ class Trainer:
 
         return tokenized_examples
 
-    def augment(self, df_original):
-        # Check if augmentations are enabled, if not skip this function
-        if not self.config["augmentation"]["enabled"]:
-            return df_original
+    def augment(self, df):
+        # Verify data type
+        assert isinstance(df, pd.DataFrame)
 
         # Create a copy of the original dataframe that will be modified;
         # the original is used in some augmentations
-        df = df_original.copy()
+        df_new = df.copy()
 
         # Load spaCy Polish language pipeline for text analysis;
         # source: https://spacy.io/models/pl
         if self.config["augmentation"]["p_replace_question_entity"] > 0:
-            spacy_nlp = spacy.load("pl_core_news_lg")
+            spacy_model = spacy.load("pl_core_news_lg")
 
         # Load Masked Language Model (MLM) for Polish language
-        if self.config["augmentation"]["p_replace_question_entity"] > 0 or self.config["augmentation"]["n_insert_context_token"] > 0:
-            mlm_pipeline = pipeline("fill-mask", model="allegro/herbert-base-cased", device=0)
+        if self.config["augmentation"]["p_replace_question_entity"] > 0 or self.config["augmentation"]["n_insert_token"] > 0:
+            mlm = pipeline("fill-mask", model="allegro/herbert-base-cased", device=0)
 
         # Load supplementary back-translated dataframes related to the original dataframe
         if self.config["augmentation"]["p_back_translate"] > 0:
-            df_back_translate = pd.DataFrame()
+            df_bt = pd.DataFrame()
             for path in self.config["dataset"]["back_translate_paths"]:
-                df_back_translate = pd.concat([df_back_translate, pd.read_csv(path).fillna("")])
+                df_bt = pd.concat([df_bt, pd.read_csv(path).fillna("")])
 
         # Load common question words to replace
         if self.config["augmentation"]["p_change_question_type"] > 0:
@@ -130,82 +129,91 @@ class Trainer:
             question_first_two_words = pd.read_csv("data/question_first_two_words.csv")
 
         # Augment each record individually
-        for i, row in tqdm(df.iterrows(), total=len(df), desc="augment"):
+        for i, row in tqdm(df_new.iterrows(), total=len(df_new), desc="augment"):
+            qa_id = row["qa_id"]
+            group_id = row["group_id"]
             context = row["context"]
             question = row["question"]
-            answer_text = row["answer_text"].strip()
+            answer_text = row["answer_text"]
             answer_start = row["answer_start"]
 
             # Use back-translation for context, question, answer
             if self.config["augmentation"]["p_back_translate"] > 0:
                 if np.random.rand() < self.config["augmentation"]["p_back_translate"]:
                     # Fetch contextually identical records
-                    relevant_rows = df_back_translate[df_back_translate["qa_id"] == row["qa_id"]]
+                    relevant_rows = df_bt[df_bt["qa_id"] == qa_id]
 
                     if len(relevant_rows) > 0:
                         # Choose random translation
-                        sample_row = relevant_rows.sample(1).iloc[0]
-                        context = sample_row["context"]
-                        answer_text = sample_row["answer_text"]
-                        answer_start = sample_row["answer_start"]
+                        random_row = relevant_rows.sample(1).iloc[0]
+                        context = random_row["context"]
+                        answer_text = random_row["answer_text"]
+                        answer_start = random_row["answer_start"]
 
                         # Question can be randomized independently
-                        sample_row = relevant_rows.sample(1).iloc[0]
-                        question = sample_row["question"]
+                        random_row = relevant_rows.sample(1).iloc[0]
+                        question = random_row["question"]
 
             # Add random context before original context
             if self.config["augmentation"]["p_prepend_context"] > 0:
                 if np.random.rand() < self.config["augmentation"]["p_prepend_context"]:
                     # Fetch contextually different records
-                    irrelevant_rows = df_original[df_original["group_id"] != row["group_id"]]
+                    irrelevant_rows = df[df["group_id"] != group_id]
 
                     if len(irrelevant_rows) > 0:
-                        temp = irrelevant_rows.sample(1).iloc[0]["context"]
-                        context = temp + " " + context
-                        answer_start += len(temp) + 1
+                        random_row = irrelevant_rows.sample(1).iloc[0]
+                        context = random_row["context"] + " " + context
+
+                        if answer_text:
+                            answer_start += len(random_row["context"] + " ")
 
             # Add random context after original context
             if self.config["augmentation"]["p_append_context"] > 0:
                 if np.random.rand() < self.config["augmentation"]["p_append_context"]:
                     # Fetch contextually different records
-                    irrelevant_rows = df_original[df_original["group_id"] != row["group_id"]]
+                    irrelevant_rows = df[df["group_id"] != group_id]
 
                     if len(irrelevant_rows) > 0:
-                        context = context + " " + irrelevant_rows.sample(1).iloc[0]["context"]
+                        random_row = irrelevant_rows.sample(1).iloc[0]
+                        context = context + " " + random_row["context"]
 
             # Replace question with an irrelevant question with respect to the context
             if self.config["augmentation"]["p_replace_question"] > 0:
                 if np.random.rand() < self.config["augmentation"]["p_replace_question"]:
                     # Fetch contextually different records
-                    irrelevant_rows = df_original[df_original["group_id"] != row["group_id"]]
+                    irrelevant_rows = df[df["group_id"] != group_id]
 
                     if len(irrelevant_rows) > 0:
-                        question = irrelevant_rows.sample(1).iloc[0]["question"]
+                        random_row = irrelevant_rows.sample(1).iloc[0]
+                        question = random_row["question"]
                         answer_text = ""
                         answer_start = 0
 
             # Find and replace noun entities in question using MLM
             if self.config["augmentation"]["p_replace_question_entity"] > 0:
                 # Copy original question to working variable
-                new_question = question
+                q = question
 
                 # For each noun entity
-                for e in spacy_nlp(question).ents:
+                for e in spacy_model(question).ents:
                     # Randomly replace it with suitable word/phrase
                     if np.random.rand() < self.config["augmentation"]["p_replace_question_entity"]:
                         # Mask original entity text
-                        masked_question = new_question.replace(e.text, mlm_pipeline.tokenizer.mask_token, 1)
+                        masked_q = q.replace(e.text, mlm.tokenizer.mask_token, 1)
 
-                        if mlm_pipeline.tokenizer.mask_token in masked_question:
+                        if mlm.tokenizer.mask_token in masked_q:
                             # Generate new text
-                            candidate_questions = mlm_pipeline(masked_question)
+                            candidates = mlm(masked_q)
+
+                            # Select text
+                            choice = np.random.choice(candidates)
 
                             # Replace entity text
-                            new_question = np.random.choice(candidate_questions)["sequence"]
+                            q = choice["sequence"]
 
                 # Check if any noun entities were actually changed
-                if question != new_question:
-                    question = new_question
+                if question != q:
+                    question = q
                     answer_text = ""
                     answer_start = 0
 
@@ -214,41 +222,51 @@ class Trainer:
                     tokens = question.split()
 
                     if np.random.rand() < 0.5:
-                        word = question_first_word.sample(1).iloc[0]["word"]
-                        tokens[0] = word
+                        one_word = question_first_word.sample(1).iloc[0]["word"].split()
+                        tokens = one_word + tokens[1:]
                     else:
-                        words = question_first_two_words.sample(1).iloc[0]["word"].split()
-                        tokens = words + tokens[2:]
+                        two_words = question_first_two_words.sample(1).iloc[0]["word"].split()
+                        tokens = two_words + tokens[2:]
 
-                    new_question = " ".join(tokens)
+                    q = " ".join(tokens)
 
-                    if question != new_question:
-                        question = new_question
+                    if question != q:
+                        question = q
                         answer_text = ""
                         answer_start = 0
 
             # Insert tokens generated by MLM
-            if self.config["augmentation"]["n_insert_context_token"] > 0:
+            if self.config["augmentation"]["n_insert_token"] > 0:
                 def insert_token(text, n):
                     for _ in range(n):
                         tokens = text.split()
                         i = np.random.randint(len(tokens))
-                        tokens_part = tokens[max(0, i - 50):i] + [mlm_pipeline.tokenizer.mask_token] + tokens[i:i + 50]
-                        text_part = " ".join(tokens_part)
-                        candidate_texts = mlm_pipeline(text_part)
-                        text_part = np.random.choice(candidate_texts)["sequence"]
-                        text = " ".join(tokens[:max(0, i - 50)] + text_part.split() + tokens[i + 50:])
+
+                        masked_text = " ".join(tokens[max(0, i - 50):i] + [mlm.tokenizer.mask_token] + tokens[i:i + 50])
+
+                        candidates = mlm(masked_text)
+                        choice = np.random.choice(candidates)
+                        filled_text = choice["sequence"]
+
+                        text = " ".join(tokens[:max(0, i - 50)] + filled_text.split() + tokens[i + 50:])
 
                     return text
 
-                n = np.random.randint(self.config["augmentation"]["n_insert_context_token"] + 1)
+                n = np.random.randint(self.config["augmentation"]["n_insert_token"] + 1)
 
                 if n > 0:
                     if answer_text:
                         context = context[:answer_start].strip() + " [ANSWER] " + context[answer_start + len(answer_text):].strip()
                         context = insert_token(context, n)
-                        answer_start = context.find("[ANSWER]")
-                        context = context.replace("[ANSWER]", answer_text)
+                        if "[ANSWER]" in context:
+                            answer_start = context.find("[ANSWER]")
+                            context = context.replace("[ANSWER]", answer_text)
+                        elif "[ ANSWER ]" in context:
+                            answer_start = context.find("[ ANSWER ]")
+                            context = context.replace("[ ANSWER ]", answer_text)
+                        else:
+                            answer_text = ""
+                            answer_start = 0
                     else:
                         context = insert_token(context, n)
 
@@ -270,9 +288,9 @@ class Trainer:
             if self.config["augmentation"]["p_drop_token"] > 0:
                 def drop_token(text):
                     if self.config["augmentation"]["replace_dropped_token_with_mask"]:
-                        return " ".join([(t if np.random.rand() > self.config["augmentation"]["p_drop_token"] else self.tokenizer.mask_token) for t in text.split()])
+                        return " ".join((t if np.random.rand() > self.config["augmentation"]["p_drop_token"] else self.tokenizer.mask_token) for t in text.split())
                     else:
-                        return " ".join([t for t in text.split() if np.random.rand() > self.config["augmentation"]["p_drop_token"]])
+                        return " ".join(t for t in text.split() if np.random.rand() > self.config["augmentation"]["p_drop_token"])
 
                 context_l = drop_token(context_l)
                 context_r = drop_token(context_r)
@@ -287,7 +305,7 @@ class Trainer:
                         if interp[0] not in lemmas:
                             lemmas[interp[0]] = interp[1].split(":")[0]
 
-                    text = " ".join([(lemmas[t] if np.random.rand() < self.config["augmentation"]["p_replace_token_with_lemma"] and t in lemmas else t) for t in text.split()])
+                    text = " ".join((lemmas[t] if t in lemmas and np.random.rand() < self.config["augmentation"]["p_replace_token_with_lemma"] else t) for t in text.split())
 
                     return text
 
@@ -315,7 +333,7 @@ class Trainer:
             # Delete chars
             if self.config["augmentation"]["p_drop_char"] > 0:
                 def drop_char(text):
-                    return "".join([c for c in text if np.random.rand() > self.config["augmentation"]["p_drop_char"]])
+                    return "".join(c for c in text if np.random.rand() > self.config["augmentation"]["p_drop_char"])
 
                 context_l = drop_char(context_l)
                 context_r = drop_char(context_r)
@@ -325,31 +343,40 @@ class Trainer:
             if self.config["augmentation"]["p_replace_polish_char"] > 0:
                 def replace_polish_char(text):
                     polish_chars = {
+                        "Ą": "A",
                         "ą": "a",
+                        "Ć": "C",
                         "ć": "c",
+                        "Ę": "E",
                         "ę": "e",
+                        "Ł": "L",
                         "ł": "l",
+                        "Ń": "N",
                         "ń": "n",
+                        "Ó": "O",
                         "ó": "o",
+                        "Ś": "S",
                         "ś": "s",
+                        "Ż": "Z",
+                        "ż": "z",
+                        "Ź": "Z",
                         "ź": "z",
-                        "ż": "z"
                     }
 
-                    return "".join([(polish_chars[c] if c in polish_chars and np.random.rand() < self.config["augmentation"]["p_replace_polish_char"] else c) for c in text])
+                    return "".join((polish_chars[c] if c in polish_chars and np.random.rand() < self.config["augmentation"]["p_replace_polish_char"] else c) for c in text)
 
                 context_l = replace_polish_char(context_l)
                 context_r = replace_polish_char(context_r)
                 answer_text = replace_polish_char(answer_text)
 
             # Convert uppercase to lowercase
-            if self.config["augmentation"]["p_lowercase_char"] > 0:
-                def p_lowercase_char(text):
-                    return "".join([(c.lower() if np.random.rand() < self.config["augmentation"]["p_lowercase_char"] else c) for c in text])
+            if self.config["augmentation"]["p_replace_uppercase_char"] > 0:
+                def replace_uppercase_char(text):
+                    return "".join((c.lower() if c.isupper() and np.random.rand() < self.config["augmentation"]["p_replace_uppercase_char"] else c) for c in text)
 
-                context_l = p_lowercase_char(context_l)
-                context_r = p_lowercase_char(context_r)
-                answer_text = p_lowercase_char(answer_text)
+                context_l = replace_uppercase_char(context_l)
+                context_r = replace_uppercase_char(context_r)
+                answer_text = replace_uppercase_char(answer_text)
 
             answer_text = answer_text.strip()
 
@@ -357,32 +384,37 @@ class Trainer:
                 context_l = context_l.strip() + " "
                 context_r = " " + context_r.strip()
                 context = context_l + answer_text + context_r
+                answer_start = len(context_l)
             else:
-                context = context_l + context_r
+                context = context_l.strip() + " " + context_r.strip()
+                answer_start = 0
 
             if answer_text == self.tokenizer.mask_token:
                 answer_text = ""
+                answer_start = 0
 
-            df.loc[i, "context"] = context
-            df.loc[i, "question"] = question
-            df.loc[i, "answer_text"] = answer_text
-            df.loc[i, "answer_start"] = len(context_l) if len(answer_text) > 0 else 0
-            df.loc[i, "has_answer"] = int(len(answer_text) > 0)
+            df_new.loc[i, "context"] = context
+            df_new.loc[i, "question"] = question
+            df_new.loc[i, "answer_text"] = answer_text
+            df_new.loc[i, "answer_start"] = answer_start
+            df_new.loc[i, "has_answer"] = int(len(answer_text) > 0)
 
-            assert answer_text == df.loc[i, "context"][df.loc[i, "answer_start"]:df.loc[i, "answer_start"] + len(df.loc[i, "answer_text"])]
+            assert answer_text == df_new.loc[i, "context"][df_new.loc[i, "answer_start"]:df_new.loc[i, "answer_start"] + len(df_new.loc[i, "answer_text"])]
 
-        print("has_answer", df["has_answer"].sum() / len(df))
+        print("has_answer", df_new["has_answer"].sum() / len(df_new))
 
-        return df
+        return df_new
 
     def get_data_loaders(self, train_df, dev_df):
-        train_df = self.augment(train_df)
+        if self.config["augmentation"]["enabled_train"]:
+            train_df = self.augment(train_df)
         train_df["answers"] = train_df[["answer_start", "answer_text"]].apply(lambda x: {"answer_start": [x[0]], "answer_text": [x[1]]}, axis=1)
         train_set = Dataset.from_pandas(train_df)
         train_set = train_set.map(self.preprocess, batched=True, remove_columns=train_set.column_names)
         train_loader = DataLoader(train_set, batch_size=self.config["train"]["batch_size"], shuffle=True)
 
-        dev_df = self.augment(dev_df)
+        if self.config["augmentation"]["enabled_dev"]:
+            dev_df = self.augment(dev_df)
         dev_df["answers"] = dev_df[["answer_start", "answer_text"]].apply(lambda x: {"answer_start": [x[0]], "answer_text": [x[1]]}, axis=1)
         dev_set = Dataset.from_pandas(dev_df)
         dev_set = dev_set.map(self.preprocess, batched=True, remove_columns=dev_set.column_names)
@@ -469,25 +501,13 @@ class Trainer:
                     optimizer.zero_grad()
                     t += 1
 
-                    if (t + 1) % self.config["train"]["eval_freq"] == 0:
+                    if (t + 1) % self.config["train"]["eval_freq"] == 0 or i == len(train_loader) - 1:
                         dev_loss = evaluate(model, dev_loader)
 
                         if dev_loss < best_loss:
                             best_loss = dev_loss
-
-                            if self.config["train"]["save_best"]:
-                                model.save_pretrained("{}/best".format(self.config["train"]["save_path"]))
-                                self.tokenizer.save_pretrained("{}/best".format(self.config["train"]["save_path"]))
-
-            if self.config["train"]["save_checkpoint"]:
-                model.save_pretrained("{}/checkpoint".format(self.config["train"]["save_path"]))
-                self.tokenizer.save_pretrained("{}/checkpoint".format(self.config["train"]["save_path"]))
-
-            if self.config["train"]["save_each_epoch"]:
-                model.save_pretrained("{}/epoch_{}".format(self.config["train"]["save_path"], epoch))
-                self.tokenizer.save_pretrained("{}/epoch_{}".format(self.config["train"]["save_path"], epoch))
-
-            #pbar.set_description("t: {} train: {:.4f} dev: {:.4f} best: {:.4f}".format(scheduler.get_t(), train_loss, dev_loss, best_loss))
+                            model.save_pretrained("{}/best".format(self.config["train"]["save_path"]))
+                            self.tokenizer.save_pretrained("{}/best".format(self.config["train"]["save_path"]))
 
         Evaluator(self.config).run()
 
